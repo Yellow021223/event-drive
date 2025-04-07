@@ -22,49 +22,51 @@ export class EDAAppStack extends cdk.Stack {
       publicReadAccess: false,
     });
 
-    
-      // Integration infrastructure
+    // 新队列名
+    const imageProcessQueue = new sqs.Queue(this, "img-created-queue", {
+      receiveMessageWaitTime: cdk.Duration.seconds(5),
+    });
 
-  const queue = new sqs.Queue(this, "img-created-queue", {
-    receiveMessageWaitTime: cdk.Duration.seconds(5),
-  });
+    // 添加 SNS Topic
+    const newImageTopic = new sns.Topic(this, "NewImageTopic", {
+      displayName: "New Image topic",
+    });
 
-  // Lambda functions
+    // S3 -> SNS
+    imagesBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.SnsDestination(newImageTopic)
+    );
 
-  const processImageFn = new lambdanode.NodejsFunction(
-    this,
-    "ProcessImageFn",
-    {
+    // SNS -> SQS
+    newImageTopic.addSubscription(
+      new subs.SqsSubscription(imageProcessQueue)
+    );
+
+    // Lambda
+    const processImageFn = new lambdanode.NodejsFunction(this, "ProcessImageFn", {
       runtime: lambda.Runtime.NODEJS_22_X,
       entry: `${__dirname}/../lambdas/processImage.ts`,
       timeout: cdk.Duration.seconds(15),
       memorySize: 128,
-    }
-  );
+    });
 
-  // S3 --> SQS
-  imagesBucket.addEventNotification(
-    s3.EventType.OBJECT_CREATED,
-    new s3n.SqsDestination(queue)
-  );
+    // SQS -> Lambda
+    const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(5),
+    });
 
- // SQS --> Lambda
-  const newImageEventSource = new events.SqsEventSource(queue, {
-    batchSize: 5,
-    maxBatchingWindow: cdk.Duration.seconds(5),
-  });
+    processImageFn.addEventSource(newImageEventSource);
 
-  processImageFn.addEventSource(newImageEventSource);
+    // 权限
+    imagesBucket.grantRead(processImageFn);
 
-  // Permissions
-
-  imagesBucket.grantRead(processImageFn);
-
-  // Output
-  
-  new cdk.CfnOutput(this, "bucketName", {
-    value: imagesBucket.bucketName,
-  });
-
+    // 输出 bucket 名
+    new cdk.CfnOutput(this, "bucketName", {
+      value: imagesBucket.bucketName,
+    });
   }
 }
+
+
