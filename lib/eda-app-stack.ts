@@ -22,28 +22,32 @@ export class EDAAppStack extends cdk.Stack {
       publicReadAccess: false,
     });
 
-    // 新队列名
+    //  图像处理队列
     const imageProcessQueue = new sqs.Queue(this, "img-created-queue", {
       receiveMessageWaitTime: cdk.Duration.seconds(5),
     });
 
-    // 添加 SNS Topic
+    //  新增：邮件通知队列
+    const mailerQ = new sqs.Queue(this, "mailer-queue", {
+      receiveMessageWaitTime: cdk.Duration.seconds(10),
+    });
+
+    //  SNS Topic
     const newImageTopic = new sns.Topic(this, "NewImageTopic", {
       displayName: "New Image topic",
     });
 
-    // S3 -> SNS
+    //  S3 -> SNS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
       new s3n.SnsDestination(newImageTopic)
     );
 
-    // SNS -> SQS
-    newImageTopic.addSubscription(
-      new subs.SqsSubscription(imageProcessQueue)
-    );
+    //  SNS -> 两个队列
+    newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
+    newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
 
-    // Lambda
+    //  Lambda - 图像处理
     const processImageFn = new lambdanode.NodejsFunction(this, "ProcessImageFn", {
       runtime: lambda.Runtime.NODEJS_22_X,
       entry: `${__dirname}/../lambdas/processImage.ts`,
@@ -51,22 +55,50 @@ export class EDAAppStack extends cdk.Stack {
       memorySize: 128,
     });
 
-    // SQS -> Lambda
+    //  Lambda - 邮件通知
+    const mailerFn = new lambdanode.NodejsFunction(this, "mailer-function", {
+      runtime: lambda.Runtime.NODEJS_16_X,
+      memorySize: 1024,
+      timeout: cdk.Duration.seconds(3),
+      entry: `${__dirname}/../lambdas/mailer.ts`,
+    });
+
+    //  imageProcessQueue → processImageFn
     const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
       batchSize: 5,
       maxBatchingWindow: cdk.Duration.seconds(5),
     });
-
     processImageFn.addEventSource(newImageEventSource);
 
-    // 权限
+    //  mailerQ → mailerFn
+    const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(5),
+    });
+    mailerFn.addEventSource(newImageMailEventSource);
+
+    //  grant read bucket for processImageFn
     imagesBucket.grantRead(processImageFn);
 
-    // 输出 bucket 名
+    //  grant SES permissions for mailerFn
+    mailerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "ses:SendEmail",
+          "ses:SendRawEmail",
+          "ses:SendTemplatedEmail",
+        ],
+        resources: ["*"],
+      })
+    );
+
+    //  输出
     new cdk.CfnOutput(this, "bucketName", {
       value: imagesBucket.bucketName,
     });
   }
 }
+
 
 
